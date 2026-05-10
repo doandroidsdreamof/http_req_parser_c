@@ -1,0 +1,22 @@
+# Build
+build/
+ascgeo
+
+# Object files
+*.o
+*.d
+
+# Debug
+*.dSYM/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~
+
+debug.txt
