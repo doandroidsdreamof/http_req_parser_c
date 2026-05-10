@@ -390,10 +390,6 @@ bool http_req_parser_parse(HttpReq *http, char *src)
                 }
                 http->body_length = atoi(http->header->data[index].val);
             }
-            /*          printf("KEY=[%s] VAL=[%s] VAL_LEN=%zu\n",
-                            http->header->data[index].key,
-                            http->header->data[index].val,
-                            strlen(http->header->data[index].val)); */
             http->header->count++;
             free(str_p);
         }
