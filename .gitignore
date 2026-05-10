@@ -22,3 +22,5 @@ Thumbs.db
 debug.txt
 
 *.exe
+
+.editorconfig
