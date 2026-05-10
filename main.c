@@ -50,7 +50,8 @@ HttpReq *http_req_parser_init()
     HttpReq *http = malloc(sizeof(HttpReq));
     if (!http)
     {
-        printf("\n\n ERR: http_req_parser_init http allocation failed");
+        fprintf(stderr, "ERROR http_req_parser_init: http malloc failed\n");
+
         return NULL;
     }
     http->body_length = 0;
@@ -61,7 +62,8 @@ HttpReq *http_req_parser_init()
     http->header = malloc(sizeof(Array));
     if (!http->header)
     {
-        printf("\n\n ERR: http_req_parser_init header allocation failed");
+        fprintf(stderr, "ERROR http_req_parser_init: header malloc failed\n");
+
         return NULL;
     }
     http->header->capacity = 4;
@@ -69,13 +71,15 @@ HttpReq *http_req_parser_init()
     http->header->data = malloc(http->header->capacity * sizeof(Entity));
     if (!http->header->data)
     {
-        printf("\n\n ERR: http_req_parser_init header->data allocation failed");
+        fprintf(stderr, "ERROR http_req_parser_init: header->data malloc failed\n");
+
         return NULL;
     }
     http->query = malloc(sizeof(Array));
     if (!http->query)
     {
-        printf("\n\n ERR: http_req_parser_init query allocation failed");
+        fprintf(stderr, "ERROR http_req_parser_init: query malloc failed\n");
+
         return NULL;
     }
     http->query->capacity = 4;
@@ -83,7 +87,8 @@ HttpReq *http_req_parser_init()
     http->query->data = malloc(http->query->capacity * sizeof(Entity));
     if (!http->query->data)
     {
-        printf("\n\n ERR: http_req_parser_init query->data allocation failed");
+        fprintf(stderr, "ERROR http_req_parser_init: query->data malloc failed\n");
+
         return NULL;
     }
     return http;
@@ -147,7 +152,7 @@ int http_req_parser_print_arr(HttpReq *http, ArrayType type)
     Array *arr = http_req_parser_arr_selector(http, type);
     if (!arr)
     {
-        printf("\n\n http_req_parser_print_arr arr failed");
+        fprintf(stderr, "ERROR http_req_parser_print_arr: array selector returned NULL\n");
         return 0;
     }
     const char *label = (type == QUERY) ? "Query" : "Header";
@@ -164,10 +169,6 @@ int http_req_parser_print_arr(HttpReq *http, ArrayType type)
 }
 bool http_req_parser_validator(const char *target, ValidatorType ValidatonType)
 {
-    /*     if (ValidatonType == VERSION)
-        {
-          printf("\n\n ---------> target [%s]", target);
-        } */
     const char **lookup =
         ValidatonType == VERSION
             ? HTTP_VERSIONS
@@ -221,9 +222,9 @@ bool http_req_parser_parse_req_line(HttpReq *http, const char *cursor,
         free(temp_method);
         return false;
     }
-    http->method = temp_method; // GET -> 4
+    http->method = temp_method;
 
-    int path_length = strcspn(cursor + method_length + 1, " "); // /index.html -> 11
+    int path_length = strcspn(cursor + method_length + 1, " ");
     http->path = strndup(cursor + method_length + 1, path_length);
 
     int version_length =
@@ -235,36 +236,101 @@ bool http_req_parser_parse_req_line(HttpReq *http, const char *cursor,
     bool is_version_valid = http_req_parser_validator(temp_version, VERSION);
     if (!is_version_valid)
     {
-
+        free(temp_version);
         return false;
     }
     http->version = temp_version;
     return true;
 }
 
-int http_req_parser_parse_body(HttpReq *http, const char *cursor)
+void http_req_parser_parse_body(HttpReq *http, const char *cursor)
 {
-    if (http->body_length < 1)
+    if (http->body_length >= 1)
     {
-        return 0;
+        http->body = strndup(cursor, http->body_length);
     }
-    http->body = strndup(cursor, http->body_length);
-    return 1;
 }
 
 void http_req_parser_parse_query(HttpReq *http)
 {
+    char *query = strstr(http->path, "?");
+    if (query != NULL)
+    {
+        //* STEP_1 wipe param from the path
+        // example[i] = '\0' I don't implement the truncation solution because
+        // after removing path it must free from the memory
+        // After:   [/][s][e][a][r][c][h][\0][q][=][1][\0]   ← 12 bytes allocated, strlen=7 -> is it vulnerable what if after the first null terminator there is a JWT token?
+        // learn it for wiping sensitive data along with what happens freed data in the heap? what is actual life cycle? -> explicit_bzero (consider long_live http connections like websockets)
+        size_t full_len = strlen(http->path);
+        size_t query_len = strlen(query);
+        size_t path_len = full_len - query_len;
+
+        // dup-then-replace pattern
+        char *old_path = http->path;
+        http->path = strndup(old_path, path_len);
+        /*
+
+        !BUG for learning
+        *query = *(query + 1); // pass ? % e.q. ?xx=1 -> xx=1
+        Before: [?][z][=][1][\0]
+                 q
+        After:  [z][z][=][1][\0]
+                    q
+        That doesn't skip ? it overwrites ? with the next character.
+
+        */
+        //* STEP_2 parse query
+        query++; // skip the ?
+        while (*query)
+        {
+            int length = strcspn(query, "&");
+            if (http->query->count == http->query->capacity)
+            {
+                int new_capacity = http->query->capacity * 2;
+                Entity *tmp = realloc(http->query->data, new_capacity * sizeof(Entity));
+                if (!tmp)
+                {
+                    return;
+                }
+                http->query->data = tmp;
+                http->query->capacity = new_capacity;
+            }
+            char *eq = memchr(query, '=', length);
+            // Two shapes a query pair can take: key=value or key with no value
+            if (eq)
+            {
+                int key_length = strcspn(query, "=");
+                http->query->data[http->query->count].key = strndup(query, key_length);
+                http->query->data[http->query->count].val = strndup(query + key_length + 1, length - key_length - 1);
+                http->query->count++;
+            }
+            else
+            {
+                int key_length = strcspn(query, "=");
+                http->query->data[http->query->count].key = strndup(query, key_length);
+                http->query->data[http->query->count].val = NULL;
+                http->query->count++;
+            }
+            query += length;
+            if (*query == '\0')
+            {
+                break;
+            }
+            query += 1; // offset of &
+        }
+    }
 }
 
-int http_req_parser_parse(HttpReq *http, char *src)
+bool http_req_parser_parse(HttpReq *http, char *src)
 {
     char *cursor = src;
     int state = 0;
     char *is_header_valid = strstr(src, "\r\n\r\n");
     if (!is_header_valid)
     {
-        printf("ERR: http_req_parser_parse ivalid header \n\n");
-        return 0;
+        fprintf(stderr, "ERROR http_req_parser_parse: invalid header (missing \\r\\n\\r\\n terminator)\n");
+
+        return false;
     }
 
     while (*cursor)
@@ -277,8 +343,9 @@ int http_req_parser_parse(HttpReq *http, char *src)
                 http_req_parser_parse_req_line(http, cursor, length);
             if (is_req_line_successed == false)
             {
-                printf("ERR: http_req_parser_parse req line parsing failed \n\n");
-                return 0;
+                fprintf(stderr, "ERROR http_req_parser_parse: invalid header (missing \\r\\n\\r\\n terminator)\n");
+
+                return false;
             }
         }
         if (state >= 1 && length == 0)
@@ -300,8 +367,8 @@ int http_req_parser_parse(HttpReq *http, char *src)
                 if (!http->header->data)
                 {
                     free(str_p);
-                    printf("\n\n ERR: http_req_parser_parse header->data allocation failed");
-                    return 0;
+                    fprintf(stderr, "ERROR http_req_parser_parse: header->data realloc failed\n");
+                    return false;
                 }
             }
             int index = http->header->count;
@@ -318,14 +385,15 @@ int http_req_parser_parse(HttpReq *http, char *src)
                     http->header->data[index].val);
                 if (is_digit == 0)
                 {
-                    printf("\n\n http_req_parser_parse body_length is not digit");
+                    fprintf(stderr, "http_req_parser_parse: Content-Length value '%s' is not numeric\n",
+                            http->header->data[index].val);
                 }
                 http->body_length = atoi(http->header->data[index].val);
             }
-            printf("KEY=[%s] VAL=[%s] VAL_LEN=%zu\n",
-                   http->header->data[index].key,
-                   http->header->data[index].val,
-                   strlen(http->header->data[index].val));
+            /*          printf("KEY=[%s] VAL=[%s] VAL_LEN=%zu\n",
+                            http->header->data[index].key,
+                            http->header->data[index].val,
+                            strlen(http->header->data[index].val)); */
             http->header->count++;
             free(str_p);
         }
@@ -334,81 +402,115 @@ int http_req_parser_parse(HttpReq *http, char *src)
         cursor += 2; // jump to next segment
     }
     http_req_parser_parse_body(http, cursor);
-    return 1;
+    if (http->path)
+    {
+        http_req_parser_parse_query(http);
+    }
+
+    return true;
 }
 
 int main()
 {
 
-    HttpReq *http_0 = http_req_parser_init();
-    char req4[] = "GET /search?q=hello&page=2 HTTP/1.1\r\nHost:search.com\r\n\r\n";
-
-    printf("\n\n --- Test 0 SAFE --- \n");
-    int test_0 = http_req_parser_parse(http_0, req4);
-    if (test_0 == 1)
+    // Test Q1 — path > query
+    // path: /api/v2/users/profile (21 chars), query: id=1 (4 chars)
+    HttpReq *http_q1 = http_req_parser_init();
+    char req_q1[] = "GET /api/v2/users/profile?id=1 HTTP/1.1\r\nHost:api.com\r\n\r\n";
+    printf("\n\n --- Test Q1 path>query --- \n");
+    bool test_q1 = http_req_parser_parse(http_q1, req_q1);
+    if (test_q1)
     {
-        http_req_parser_print(http_0);
+        http_req_parser_print(http_q1);
+    }
+    // Expected:
+    // Method: GET
+    // Path: /api/v2/users/profile
+    // Version: HTTP/1.1
+    // Query (key,value): (id,1)
+    // Header (key,value): (Host,api.com)
+    // Body: (EMPTY)
+
+    // Test Q2 — query > path
+    // path: /s (2 chars), query: q=looooong&filter=active&sort=date&page=1 (40 chars)
+    HttpReq *http_q2 = http_req_parser_init();
+    char req_q2[] = "GET /s?q=looooong&filter=active&sort=date&page=1 HTTP/1.1\r\nHost:s.com\r\n\r\n";
+    printf("\n\n --- Test Q2 query>path --- \n");
+    bool test_q2 = http_req_parser_parse(http_q2, req_q2);
+    if (test_q2)
+    {
+        http_req_parser_print(http_q2);
     }
 
+    // Expected:
+    // Method: GET
+    // Path: /s
+    // Version: HTTP/1.1
+    // Query (key,value): (q,looooong)
+    // Query (key,value): (filter,active)
+    // Query (key,value): (sort,date)
+    // Query (key,value): (page,1)
+    // Header (key,value): (Host,s.com)
+    // Body: (EMPTY)
+
+    // Test Q3 — path == query (both 7 chars)
+    // path: /search (7 chars), query: q=hello (7 chars)
+    HttpReq *http_q3 = http_req_parser_init();
+    char req_q3[] = "GET /search?q=hello HTTP/1.1\r\nHost:s.com\r\n\r\n";
+    printf("\n\n --- Test Q3 path==query --- \n");
+    bool test_q3 = http_req_parser_parse(http_q3, req_q3);
+    if (test_q3)
+    {
+        http_req_parser_print(http_q3);
+    }
+    // Expected:
     // Method: GET
     // Path: /search
-    // Query[0]: q=hello
-    // Query[1]: page=2
     // Version: HTTP/1.1
-    // Header[0]: Host: search.com
-    // Body: (empty)
+    // Query (key,value): (q,hello)
+    // Header (key,value): (Host,s.com)
+    // Body: (EMPTY)
 
-    HttpReq *http = http_req_parser_init();
-
-    // Test 2 — GET with multiple headers
-    char req2[] = "GET /index.html HTTP/1.1\r\nHost: example.com\r\nAccept: "
-                  "text/html\r\nConnection: close\r\nConnection: close\r\n\r\n";
-    printf("\n\n --- Test 2 SAFE --- \n");
-    int test_1 = http_req_parser_parse(http, req2);
-    if (test_1 == 1)
+    // Test Q4 — single-char path, single-char query
+    // path: /a (2 chars), query: x=1 (3 chars) — minimum non-trivial case
+    HttpReq *http_q4 = http_req_parser_init();
+    char req_q4[] = "GET /a?x=1 HTTP/1.1\r\nHost:s.com\r\n\r\n";
+    printf("\n\n --- Test Q4 minimal --- \n");
+    bool test_q4 = http_req_parser_parse(http_q4, req_q4);
+    if (test_q4)
     {
-        http_req_parser_print(http);
+        http_req_parser_print(http_q4);
+    }
+    // Expected:
+    // Method: GET
+    // Path: /a
+    // Version: HTTP/1.1
+    // Query (key,value): (x,1)
+    // Header (key,value): (Host,s.com)
+    // Body: (EMPTY)
+
+    // Test Q5 — extreme imbalance, very long path, tiny query
+    // Forces both that path length math is independent of query, and that you don't truncate
+    HttpReq *http_q5 = http_req_parser_init();
+    char req_q5[] = "GET /a/b/c/d/e/f/g/h/i/j/k/l/m/n?z=1 HTTP/1.1\r\nHost:s.com\r\n\r\n";
+    printf("\n\n --- Test Q5 long-path/short-query --- \n");
+    bool test_q5 = http_req_parser_parse(http_q5, req_q5);
+    if (test_q5)
+    {
+        http_req_parser_print(http_q5);
     }
 
-    HttpReq *http_2 = http_req_parser_init();
-    char req3[] =
-        "POST /api/users HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: "
-        "application/json\r\nContent-Length: 27\r\nHeader: "
-        "last\r\n\r\n{\"name\":\"x\",\"active\":true}";
-    printf("\n\n --- Test 3 SAFE ---\n");
-    int test_2 = http_req_parser_parse(http_2, req3);
-    if (test_2 == 1)
-    {
-        http_req_parser_print(http_2);
-    }
-
-    HttpReq *http_3 = http_req_parser_init();
-
-    char req7[] = "GET /broken\r\nHost: bad.com\r\n\r\n";
-    printf("\n\n --- Test 7 BROKEN --- \n\n");
-    int test_3 = http_req_parser_parse(http_3, req7);
-    if (test_3 == 1)
-    {
-        http_req_parser_print(http_3);
-    }
-    // Error: malformed request line
-
-    HttpReq *http_4 = http_req_parser_init();
-    // Test 8 — Malformed: no \r\n
-    char req8[] = "GET / HTTP/1.1\nHost: bad.com\n\n";
-    printf("\n\n --- Test 8 BROKEN ---\n\n");
-    int test_4 = http_req_parser_parse(http_4, req8);
-    if (test_4 == 1)
-    {
-        http_req_parser_print(http_4);
-    }
-    // Error: expected \r\n, got \n
-
-    http_req_parser_free(http_0);
-    http_req_parser_free(http);
-    http_req_parser_free(http_2);
-    http_req_parser_free(http_3);
-    http_req_parser_free(http_4);
-
+    // Expected:
+    // Method: GET
+    // Path: /a/b/c/d/e/f/g/h/i/j/k/l/m/n
+    // Version: HTTP/1.1
+    // Query (key,value): (z,1)
+    // Header (key,value): (Host,s.com)
+    // Body: (EMPTY)
+    http_req_parser_free(http_q1);
+    http_req_parser_free(http_q2);
+    http_req_parser_free(http_q3);
+    http_req_parser_free(http_q4);
+    http_req_parser_free(http_q5);
     return 0;
 }
